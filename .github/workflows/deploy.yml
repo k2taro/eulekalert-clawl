@@ -1,62 +1,38 @@
-name: Deploy to Cloud Run
+name: Fetch EurekAlert Press Releases
 
 on:
-  push:
-    branches:
-      - main  # mainブランチにプッシュされたら自動起動
-
-env:
-  PROJECT_ID: 'あなたのGCPプロジェクトID'
-  REGION: 'asia-northeast1' # 東京リージョン（無料枠対象）
-  SERVICE_NAME: 'fastapi-embedding-api'
-  REPOSITORY_NAME: 'my-artifacts' # Artifact Registryのレポジトリ名
+  schedule:
+    # 1時間に1回、自動で実行する設定 (UTC時間のため、毎時0分に実行)
+    - cron: '0 * * * *'
+  workflow_dispatch: # ボタンを押して手動でいつでも実行できる設定
 
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-latest
-    # GitHub Actionsの無料枠（月2,000分）を無駄に消費しないよう、10分でタイムアウトさせる
-    timeout-minutes: 10
-
-    # Workload Identity連携に必要な権限設定
     permissions:
-      contents: 'read'
-      id-token: 'write'
+      contents: write # リポジトリにファイル変更を書き込むために必要
 
     steps:
-    - name: Checkout code
+    - name: リポジトリのコードをチェックアウト
       uses: actions/checkout@v4
 
-    # 1. Google Cloud 認証（Workload Identity）
-    - name: Google Auth
-      id: auth
-      uses: google-github-actions/auth@v2
+    - name: Pythonのセットアップ
+      uses: actions/setup-python@v5
       with:
-        workload_identity_provider: 'projects/【プロジェクト番号】/locations/global/workloadIdentityPools/【プール名】/providers/【プロバイダー名】'
-        service_account: '【サービスアカウントのメールアドレス】'
+        python-version: '3.10'
 
-    # 2. DockerをArtifact Registryにプッシュするための認証設定
-    - name: Docker Auth
+    - name: プレスリリースを取得して解析
+      run: python fetch_press.py
+
+    - name: 新着があればGitHubにコミットして保存
       run: |
-        gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
-
-    # 3. Dockerイメージのビルドとプッシュ
-    - name: Build and Push Container
-      run: |
-        TAG="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY_NAME }}/${{ env.SERVICE_NAME }}:${{ github.sha }}"
-        docker build -t $TAG .
-        docker push $TAG
-        echo "IMAGE_TAG=$TAG" >> $GITHUB_ENV
-
-    # 4. Cloud Run へのデプロイ（★ここで無料枠を死守する設定を入れます）
-    - name: Deploy to Cloud Run
-      uses: google-github-actions/deploy-cloud-run@v2
-      with:
-        service: ${{ env.SERVICE_NAME }}
-        region: ${{ env.REGION }}
-        image: ${{ env.IMAGE_TAG }}
-        flags: |
-          --allow-unauthenticated
-          --min-instances=0
-          --max-instances=1
-          --memory=2Gi
-          --cpu=1
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        # 変更（新着）があるか確認
+        if [ -n "$(git status --porcelain)" ]; then
+          git add releases.csv
+          git commit -m "更新: 新着プレスリリースを追加"
+          git push
+        else
+          echo "変更はありませんでした。"
+        fi
