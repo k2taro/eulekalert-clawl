@@ -4,14 +4,11 @@ import csv
 import urllib.request
 from bs4 import BeautifulSoup
 
-# 解析対象のURL（EurekAlert! 日本語版トップ）
 TARGET_URL = "https://www.eurekalert.org/language/japanese/home"
 CSV_FILE = "releases.csv"
 
 def fetch_html():
-    """WebページからHTMLを取得する"""
     try:
-        # 403 Forbiddenなどのアクセス拒否を防ぐため、ブラウザのふりをするUser-Agentを設定
         req = urllib.request.Request(
             TARGET_URL, 
             headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
@@ -23,79 +20,79 @@ def fetch_html():
         return None
 
 def parse_html(html_data):
-    """HTMLを解析してニュースリリースの情報を抽出する"""
     items = []
     if not html_data:
         return items
     
     soup = BeautifulSoup(html_data, 'html.parser')
     
-    # ニュースの一覧エリア（通常、記事リンクを含むブロック）を探す
-    # 2026年現在のEurekAlert!の標準的な構造（h2タグ内のリンクなど）に適合させています
+    # 改善点：ニュースリリースを内正する個々のコンテナ（ブロック）を特定してループを回すと安全です
+    # ここでは一般的な記事配下の構造、または各h2要素を起点とします
     articles = soup.find_all('h2')
     
     for h2 in articles:
-        link_tag = h2.find('a')
+        # h2自体がaタグ、またはh2の中にaタグがある両方のパターンに対応
+        link_tag = h2 if h2.name == 'a' else h2.find('a')
+        if not link_tag:
+            # 周辺（直近の親要素など）にリンクがないか再探索
+            link_tag = h2.find_parent('a') or h2.find_next('a')
+            
         if not link_tag:
             continue
             
-        title = link_tag.get_text(strip=True)
+        title = h2.get_text(strip=True)
         relative_url = link_tag.get('href', '')
         
-        # 相対URLを絶対URLに変換
         if relative_url.startswith('/'):
             url = f"https://www.eurekalert.org{relative_url}"
         else:
             url = relative_url
             
-        # 日付と概要、DOIの探索（h2の直前の要素や周辺の構造から取得を試みる）
-        # ※HTMLから直接DOIを抜くため、今回は周辺テキストから正規表現で抽出
-        parent_or_sibling = h2.find_parent()
-        parent_text = parent_or_sibling.get_text() if parent_or_sibling else ""
+        # 記事ブロックごとのテキストに限定して検索（誤検知防止）
+        container = h2.find_parent(class_=re.compile(r'(hentry|article|release|item)')) or h2.find_parent()
+        container_text = container.get_text() if container else ""
         
-        # 本文からDOIを特定するルール
-        doi_match = re.search(r'10\.\d{4,9}/[-._;()/:A-Za-z0-9]+', parent_text)
+        # DOIの抽出
+        doi_match = re.search(r'10\.\d{4,9}/[-._;()/:A-Za-z0-9]+', container_text)
         doi = doi_match.group(0) if doi_match else "なし"
         
-        # 日付の抽出（例: 18-Sep-2026 などのパターンを検索）
-        date_match = re.search(r'\d{1,2}-[A-Za-z]{3}-\d{4}', parent_text)
+        # 日付の抽出（h2の前の要素、またはコンテナ内から探す）
+        date_match = re.search(r'\d{1,2}-[A-Za-z]{3}-\d{4}', container_text)
         date = date_match.group(0) if date_match else "不明"
         
-        items.append({
-            "date": date,
-            "title": title,
-            "doi": doi,
-            "url": url
-        })
+        # タイトルやURLが空でない場合のみ追加
+        if title and url:
+            items.append({
+                "date": date,
+                "title": title,
+                "doi": doi,
+                "url": url
+            })
         
     return items
 
 def update_csv(new_items):
-    """既存のCSVを確認し、新しいデータのみを追記する"""
     existing_urls = set()
     file_exists = os.path.exists(CSV_FILE)
     
-    # すでに保存されているURLを読み込んで重複を防ぐ
     if file_exists:
         with open(CSV_FILE, mode='r', encoding='utf-8') as f:
             reader = csv.DictReader(f)
             for row in reader:
                 existing_urls.add(row.get('url'))
                 
-    # 新着データだけを絞り込む（古い順に書き込めるよう逆順にする）
     items_to_add = [item for item in reversed(new_items) if item['url'] not in existing_urls]
     
     if not items_to_add:
         print("新しいプレスリリースはありませんでした。")
         return False
         
-    # CSVに追記
     with open(CSV_FILE, mode='a', encoding='utf-8', newline='') as f:
         fieldnames = ['date', 'title', 'doi', 'url']
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         
         if not file_exists:
-            writer.writeheader() # ファイルが新規作成の場合のみ見出しを書き込む
+            writer.writeheader()
             
         for item in items_to_add:
             writer.writerow(item)
